@@ -60,6 +60,8 @@ class MainViewModel(private val vpnViewModel: VpnViewModel) : IpnViewModel() {
 
   // Permission to prepare VPN
   private var vpnPermissionLauncher: ActivityResultLauncher<Intent>? = null
+  private val _requestVpnPermission = MutableStateFlow(false)
+  val requestVpnPermission: StateFlow<Boolean> = _requestVpnPermission
 
   // The list of peers
   private val _peers = MutableStateFlow<List<PeerSet>>(emptyList())
@@ -187,6 +189,10 @@ class MainViewModel(private val vpnViewModel: VpnViewModel) : IpnViewModel() {
     }
   }
 
+  fun maybeRequestVpnPermission() {
+    _requestVpnPermission.value = true
+  }
+
   fun showVPNPermissionLauncherIfUnauthorized() {
     val vpnIntent = VpnService.prepare(App.get())
     if (vpnIntent != null) {
@@ -195,6 +201,7 @@ class MainViewModel(private val vpnViewModel: VpnViewModel) : IpnViewModel() {
       vpnViewModel.setVpnPrepared(true)
       startVPN()
     }
+    _requestVpnPermission.value = false // reset
   }
 
   fun toggleVpn(desiredState: Boolean) {
