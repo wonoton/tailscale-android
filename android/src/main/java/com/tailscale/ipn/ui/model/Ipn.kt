@@ -4,9 +4,9 @@
 package com.tailscale.ipn.ui.model
 
 import android.net.Uri
+import java.util.UUID
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
-import java.util.UUID
 
 class Ipn {
 
@@ -31,7 +31,7 @@ class Ipn {
     }
   }
 
-  // A nofitication message recieved on the Notify bus.  Fields will be populated based
+  // A notification message received on the Notify bus.  Fields will be populated based
   // on which NotifyWatchOpts were set when the Notifier was created.
   @Serializable
   data class Notify(

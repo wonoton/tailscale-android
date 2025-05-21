@@ -70,6 +70,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.tailscale.ipn.App
 import com.tailscale.ipn.R
@@ -94,6 +97,7 @@ import com.tailscale.ipn.ui.theme.short
 import com.tailscale.ipn.ui.theme.surfaceContainerListItem
 import com.tailscale.ipn.ui.theme.warningButton
 import com.tailscale.ipn.ui.theme.warningListItem
+import com.tailscale.ipn.ui.util.AndroidTVUtil
 import com.tailscale.ipn.ui.util.AndroidTVUtil.isAndroidTV
 import com.tailscale.ipn.ui.util.AutoResizingText
 import com.tailscale.ipn.ui.util.Lists
@@ -207,8 +211,13 @@ fun MainView(
               Ipn.State.Running -> {
 
                 PromptPermissionsIfNecessary()
-
-                viewModel.showVPNPermissionLauncherIfUnauthorized()
+                viewModel.maybeRequestVpnPermission()
+                LaunchVpnPermissionIfNeeded(viewModel)
+                LaunchedEffect(state) {
+                  if (state == Ipn.State.Running && !AndroidTVUtil.isAndroidTV()) {
+                    viewModel.showDirectoryPickerLauncher()
+                  }
+                }
 
                 if (showKeyExpiry) {
                   ExpiryNotification(netmap = netmap, action = { viewModel.login() })
@@ -239,7 +248,9 @@ fun MainView(
                     { viewModel.login() },
                     loginAtUrl,
                     netmap?.SelfNode,
-                    { viewModel.showVPNPermissionLauncherIfUnauthorized() })
+                    {
+                      viewModel.showVPNPermissionLauncherIfUnauthorized()
+                    })
               }
             }
           }
@@ -249,6 +260,21 @@ fun MainView(
           PingView(model = viewModel.pingViewModel)
         }
       }
+    }
+  }
+}
+
+@Composable
+fun LaunchVpnPermissionIfNeeded(viewModel: MainViewModel) {
+  val lifecycleOwner = LocalLifecycleOwner.current
+  val shouldRequest by viewModel.requestVpnPermission.collectAsState()
+
+  LaunchedEffect(shouldRequest) {
+    if (!shouldRequest) return@LaunchedEffect
+
+    // Defer showing permission launcher until activity is resumed to avoid silent RESULT_CANCELED
+    lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+      viewModel.showVPNPermissionLauncherIfUnauthorized()
     }
   }
 }
@@ -415,11 +441,11 @@ fun ConnectView(
     loginAction: () -> Unit,
     loginAtUrlAction: (String) -> Unit,
     selfNode: Tailcfg.Node?,
-    showVPNPermissionLauncherIfUnauthorized: () -> Unit
+    showVPNPermissionLauncher: () -> Unit
 ) {
   LaunchedEffect(isPrepared) {
     if (!isPrepared && shouldStartAutomatically) {
-      showVPNPermissionLauncherIfUnauthorized()
+      showVPNPermissionLauncher()
     }
   }
   Row(horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxWidth()) {
