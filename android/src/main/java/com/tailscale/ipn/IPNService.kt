@@ -46,12 +46,15 @@ open class IPNService : VpnService(), libtailscale.IPNService {
           close()
           START_NOT_STICKY
         }
-        ACTION_START_VPN -> {
-          scope.launch {
-            // Collect the first value of hideDisconnectAction asynchronously.
-            val hideDisconnectAction = MDMSettings.forceEnabled.flow.first()
-            showForegroundNotification(hideDisconnectAction.value)
+        ACTION_RESTART_VPN -> {
+          app.setWantRunning(false){
+            close()
+            app.startVPN()
           }
+          START_NOT_STICKY
+        }
+        ACTION_START_VPN -> {
+          scope.launch { showForegroundNotification() }
           app.setWantRunning(true)
           Libtailscale.requestVPN(this)
           START_STICKY
@@ -63,7 +66,9 @@ open class IPNService : VpnService(), libtailscale.IPNService {
           scope.launch {
             // Collect the first value of hideDisconnectAction asynchronously.
             val hideDisconnectAction = MDMSettings.forceEnabled.flow.first()
-            app.notifyStatus(true, hideDisconnectAction.value)
+            val exitNodeName =
+                UninitializedApp.getExitNodeName(Notifier.prefs.value, Notifier.netmap.value)
+            app.notifyStatus(true, hideDisconnectAction.value, exitNodeName)
           }
           app.setWantRunning(true)
           Libtailscale.requestVPN(this)
@@ -73,11 +78,7 @@ open class IPNService : VpnService(), libtailscale.IPNService {
           // This means that we were restarted after the service was killed
           // (potentially due to OOM).
           if (UninitializedApp.get().isAbleToStartVPN()) {
-            scope.launch {
-              // Collect the first value of hideDisconnectAction asynchronously.
-              val hideDisconnectAction = MDMSettings.forceEnabled.flow.first()
-              showForegroundNotification(hideDisconnectAction.value)
-            }
+            scope.launch { showForegroundNotification() }
             App.get()
             Libtailscale.requestVPN(this)
             START_STICKY
@@ -88,7 +89,6 @@ open class IPNService : VpnService(), libtailscale.IPNService {
       }
 
   override fun close() {
-    app.setWantRunning(false) {}
     Notifier.setState(Ipn.State.Stopping)
     disconnectVPN()
     Libtailscale.serviceDisconnect(this)
@@ -114,14 +114,23 @@ open class IPNService : VpnService(), libtailscale.IPNService {
     app.getAppScopedViewModel().setVpnPrepared(isPrepared)
   }
 
-  private fun showForegroundNotification(hideDisconnectAction: Boolean) {
+  private fun showForegroundNotification(
+      hideDisconnectAction: Boolean,
+      exitNodeName: String? = null
+  ) {
     try {
       startForeground(
           UninitializedApp.STATUS_NOTIFICATION_ID,
-          UninitializedApp.get().buildStatusNotification(true, hideDisconnectAction))
+          UninitializedApp.get().buildStatusNotification(true, hideDisconnectAction, exitNodeName))
     } catch (e: Exception) {
       TSLog.e(TAG, "Failed to start foreground service: $e")
     }
+  }
+
+  private fun showForegroundNotification() {
+    val hideDisconnectAction = MDMSettings.forceEnabled.flow.value.value
+    val exitNodeName = UninitializedApp.getExitNodeName(Notifier.prefs.value, Notifier.netmap.value)
+    showForegroundNotification(hideDisconnectAction, exitNodeName)
   }
 
   private fun configIntent(): PendingIntent {
@@ -177,5 +186,6 @@ open class IPNService : VpnService(), libtailscale.IPNService {
   companion object {
     const val ACTION_START_VPN = "com.tailscale.ipn.START_VPN"
     const val ACTION_STOP_VPN = "com.tailscale.ipn.STOP_VPN"
+    const val ACTION_RESTART_VPN = "com.tailscale.ipn.RESTART_VPN"
   }
 }

@@ -10,18 +10,22 @@ import android.content.Context
 import android.content.Intent
 import android.content.RestrictionsManager
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration.SCREENLAYOUT_SIZE_LARGE
 import android.content.res.Configuration.SCREENLAYOUT_SIZE_MASK
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Process
 import android.provider.Settings
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContract
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.annotation.RequiresApi
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.core.LinearOutSlowInEasing
@@ -45,6 +49,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.tailscale.ipn.mdm.MDMSettings
+import com.tailscale.ipn.mdm.ShowHide
 import com.tailscale.ipn.ui.model.Ipn
 import com.tailscale.ipn.ui.notifier.Notifier
 import com.tailscale.ipn.ui.theme.AppTheme
@@ -67,6 +72,7 @@ import com.tailscale.ipn.ui.view.ManagedByView
 import com.tailscale.ipn.ui.view.MullvadExitNodePicker
 import com.tailscale.ipn.ui.view.MullvadExitNodePickerList
 import com.tailscale.ipn.ui.view.MullvadInfoView
+import com.tailscale.ipn.ui.view.NotificationsView
 import com.tailscale.ipn.ui.view.PeerDetails
 import com.tailscale.ipn.ui.view.PermissionsView
 import com.tailscale.ipn.ui.view.RunExitNodeView
@@ -74,12 +80,14 @@ import com.tailscale.ipn.ui.view.SearchView
 import com.tailscale.ipn.ui.view.SettingsView
 import com.tailscale.ipn.ui.view.SplitTunnelAppPickerView
 import com.tailscale.ipn.ui.view.SubnetRoutingView
+import com.tailscale.ipn.ui.view.TaildropDirView
 import com.tailscale.ipn.ui.view.TailnetLockSetupView
 import com.tailscale.ipn.ui.view.UserSwitcherNav
 import com.tailscale.ipn.ui.view.UserSwitcherView
 import com.tailscale.ipn.ui.viewModel.ExitNodePickerNav
 import com.tailscale.ipn.ui.viewModel.MainViewModel
 import com.tailscale.ipn.ui.viewModel.MainViewModelFactory
+import com.tailscale.ipn.ui.viewModel.PermissionsViewModel
 import com.tailscale.ipn.ui.viewModel.PingViewModel
 import com.tailscale.ipn.ui.viewModel.SettingsNav
 import com.tailscale.ipn.ui.viewModel.VpnViewModel
@@ -89,6 +97,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import libtailscale.Libtailscale
 
 class MainActivity : ComponentActivity() {
   private lateinit var navController: NavHostController
@@ -99,6 +108,7 @@ class MainActivity : ComponentActivity() {
     ViewModelProvider(this, MainViewModelFactory(vpnViewModel)).get(MainViewModel::class.java)
   }
   private lateinit var vpnViewModel: VpnViewModel
+  val permissionsViewModel: PermissionsViewModel by viewModels()
 
   companion object {
     private const val TAG = "Main Activity"
@@ -124,6 +134,14 @@ class MainActivity : ComponentActivity() {
     App.get()
     vpnViewModel = ViewModelProvider(App.get()).get(VpnViewModel::class.java)
 
+    val rm = getSystemService(Context.RESTRICTIONS_SERVICE) as RestrictionsManager
+    MDMSettings.update(App.get(), rm)
+
+    if (MDMSettings.onboardingFlow.flow.value.value == ShowHide.Hide ||
+        MDMSettings.authKey.flow.value.value != null) {
+      setIntroScreenViewed(true)
+    }
+
     // (jonathan) TODO: Force the app to be portrait on small screens until we have
     // proper landscape layout support
     if (!isLandscapeCapable()) {
@@ -145,10 +163,63 @@ class MainActivity : ComponentActivity() {
             } else {
               TSLog.d("VpnPermission", "Permission was denied by the user")
               vpnViewModel.setVpnPrepared(false)
+
+              AlertDialog.Builder(this)
+                  .setTitle(R.string.vpn_permission_needed)
+                  .setMessage(R.string.vpn_explainer)
+                  .setPositiveButton(R.string.try_again) { _, _ ->
+                    viewModel.showVPNPermissionLauncherIfUnauthorized()
+                  }
+                  .setNegativeButton(R.string.cancel, null)
+                  .show()
             }
           }
         }
     viewModel.setVpnPermissionLauncher(vpnPermissionLauncher)
+
+    val directoryPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
+          if (uri != null) {
+            try {
+              // Try to take persistable permissions for both read and write.
+              contentResolver.takePersistableUriPermission(
+                  uri,
+                  Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            } catch (e: SecurityException) {
+              TSLog.e("MainActivity", "Failed to persist permissions: $e")
+            }
+
+            // Check if write permission is actually granted.
+            val writePermission =
+                this.checkUriPermission(
+                    uri, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            if (writePermission == PackageManager.PERMISSION_GRANTED) {
+              TSLog.d("MainActivity", "Write permission granted for $uri")
+
+              lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                  Libtailscale.setDirectFileRoot(uri.toString())
+                  TaildropDirectoryStore.saveFileDirectory(uri)
+                  permissionsViewModel.refreshCurrentDir()
+                } catch (e: Exception) {
+                  TSLog.e("MainActivity", "Failed to set Taildrop root: $e")
+                }
+              }
+            } else {
+              TSLog.d(
+                  "MainActivity",
+                  "Write access not granted for $uri. Falling back to internal storage.")
+              // Don't save directory URI and fall back to internal storage.
+            }
+          } else {
+            TSLog.d(
+                "MainActivity", "Taildrop directory not saved. Will fall back to internal storage.")
+
+            // Fall back to internal storage.
+          }
+        }
+
+    viewModel.setDirectoryPickerLauncher(directoryPickerLauncher)
 
     setContent {
       navController = rememberNavController()
@@ -198,7 +269,7 @@ class MainActivity : ComponentActivity() {
                           onNavigateToSearch = {
                             viewModel.enableSearchAutoFocus()
                             navController.navigate("search")
-                        })
+                          })
 
                   val settingsNav =
                       SettingsNav(
@@ -245,9 +316,8 @@ class MainActivity : ComponentActivity() {
                         viewModel = viewModel,
                         navController = navController,
                         onNavigateBack = { navController.popBackStack() },
-                        autoFocus = autoFocus
-                    )
-                }
+                        autoFocus = autoFocus)
+                  }
                   composable("settings") { SettingsView(settingsNav) }
                   composable("exitNodes") { ExitNodePicker(exitNodePickerNav) }
                   composable("health") { HealthView(backTo("main")) }
@@ -279,7 +349,17 @@ class MainActivity : ComponentActivity() {
                   composable("managedBy") { ManagedByView(backTo("settings")) }
                   composable("userSwitcher") { UserSwitcherView(userSwitcherNav) }
                   composable("permissions") {
-                    PermissionsView(backTo("settings"), ::openApplicationSettings)
+                    PermissionsView(
+                        backTo("settings"),
+                        { navController.navigate("taildropDir") },
+                        { navController.navigate("notifications") })
+                  }
+                  composable("taildropDir") {
+                    TaildropDirView(
+                        backTo("permissions"), directoryPickerLauncher, permissionsViewModel)
+                  }
+                  composable("notifications") {
+                    NotificationsView(backTo("permissions"), ::openApplicationSettings)
                   }
                   composable("intro", exitTransition = { fadeOut(animationSpec = tween(150)) }) {
                     IntroView(backTo("main"))
@@ -292,9 +372,7 @@ class MainActivity : ComponentActivity() {
                         onNavigateHome = backTo("main"), backTo("userSwitcher"))
                   }
                 }
-
-            // Show the intro screen one time
-            if (!introScreenViewed()) {
+            if (isIntroScreenViewedSet()) {
               navController.navigate("intro")
               setIntroScreenViewed(true)
             }
@@ -365,23 +443,25 @@ class MainActivity : ComponentActivity() {
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     if (intent.getBooleanExtra(START_AT_ROOT, false)) {
+      if (this::navController.isInitialized) {
+        val previousEntry = navController.previousBackStackEntry
+        TSLog.d("MainActivity", "onNewIntent: previousBackStackEntry = $previousEntry")
         if (this::navController.isInitialized) {
-            val previousEntry = navController.previousBackStackEntry
-            TSLog.d("MainActivity", "onNewIntent: previousBackStackEntry = $previousEntry")
+          val previousEntry = navController.previousBackStackEntry
+          TSLog.d("MainActivity", "onNewIntent: previousBackStackEntry = $previousEntry")
 
-            if (previousEntry != null) {
-                navController.popBackStack(route = "main", inclusive = false)
-            } else {
-                TSLog.e("MainActivity", "onNewIntent: No previous back stack entry, navigating directly to 'main'")
-                navController.navigate("main") {
-                    popUpTo("main") { inclusive = true }
-                }
-            }
+          if (previousEntry != null) {
+            navController.popBackStack(route = "main", inclusive = false)
+          } else {
+            TSLog.e(
+                "MainActivity",
+                "onNewIntent: No previous back stack entry, navigating directly to 'main'")
+            navController.navigate("main") { popUpTo("main") { inclusive = true } }
+          }
         }
+      }
     }
-}
-
-
+  }
 
   private fun login(urlString: String) {
     // Launch coroutine to listen for state changes. When the user completes login, relaunch
@@ -430,10 +510,6 @@ class MainActivity : ComponentActivity() {
     lifecycleScope.launch(Dispatchers.IO) { MDMSettings.update(App.get(), restrictionsManager) }
   }
 
-  override fun onStart() {
-    super.onStart()
-  }
-
   override fun onStop() {
     super.onStop()
     val restrictionsManager =
@@ -450,8 +526,8 @@ class MainActivity : ComponentActivity() {
     startActivity(intent)
   }
 
-  private fun introScreenViewed(): Boolean {
-    return getSharedPreferences("introScreen", Context.MODE_PRIVATE).getBoolean("seen", false)
+  private fun isIntroScreenViewedSet(): Boolean {
+    return !getSharedPreferences("introScreen", Context.MODE_PRIVATE).getBoolean("seen", false)
   }
 
   private fun setIntroScreenViewed(seen: Boolean) {
